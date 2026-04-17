@@ -74,20 +74,19 @@ pub const Server = struct {
 
         std.log.info("Server listening on http://127.0.0.1:8080", .{});
 
+        var group: Io.Group = .init;
+        defer group.deinit(server.io);
+
         while (true) {
             const stream = net_server.accept(server.io) catch |err| {
                 std.log.err("accept error: {s}", .{@errorName(err)});
                 continue;
             };
-            defer stream.close(server.io);
 
-            var stream_reader = stream.reader(server.io, &server.read_buffer);
-            var stream_writer = stream.writer(server.io, &server.write_buffer);
-
-            var http_server = std.http.Server.init(&stream_reader.interface, &stream_writer.interface);
-            server.handleConnection(&http_server) catch |err| {
-                std.log.err("connection error: {s}", .{@errorName(err)});
-            };
+            group.async(server.io, handleConnectionAsync, .{
+                server,
+                stream,
+            });
         }
     }
 
@@ -97,6 +96,18 @@ pub const Server = struct {
             .path = path,
             .handler = handler,
         });
+    }
+
+    fn handleConnectionAsync(server: *Server, stream: Io.net.Stream) void {
+        defer stream.close(server.io);
+
+        var stream_reader = stream.reader(server.io, &server.read_buffer);
+        var stream_writer = stream.writer(server.io, &server.write_buffer);
+
+        var http_server = std.http.Server.init(&stream_reader.interface, &stream_writer.interface);
+        server.handleConnection(&http_server) catch |err| {
+            std.log.err("connection error: {s}", .{@errorName(err)});
+        };
     }
 
     fn handleConnection(server: *Server, http_server: *std.http.Server) !void {
