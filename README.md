@@ -68,6 +68,14 @@ try server.post("/submit", handler);
 // Path parameters (prefixed with :)
 try server.get("/users/:id", handler);
 try server.get("/articles/:year/:month", handler);
+
+// Route groups
+var api = server.group("/api");
+try api.get("/users", handler); // /api/users
+
+var v1 = server.group("/v1");
+var posts = try v1.group("/posts");
+try posts.get("/:id", handler); // /v1/posts/:id
 ```
 
 ## Supported HTTP Methods

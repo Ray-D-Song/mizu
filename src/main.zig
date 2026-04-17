@@ -14,6 +14,15 @@ pub fn main(init: std.process.Init) !void {
     try server.get("/hello/:name", helloHandler);
     try server.post("/echo", echoHandler);
 
+    var api = server.group("/api");
+    try api.get("/users", usersHandler);
+    try api.post("/users", createUserHandler);
+
+    var v1 = server.group("/v1");
+    var v1_posts = try v1.group("/posts");
+    try v1_posts.get("/", postsHandler);
+    try v1_posts.get("/:id", postHandler);
+
     std.log.info("Starting server on http://127.0.0.1:8080", .{});
     try server.listen(address);
 }
@@ -32,4 +41,21 @@ fn helloHandler(ctx: *mizu.Context) anyerror!void {
 fn echoHandler(ctx: *mizu.Context) anyerror!void {
     const body = try ctx.body();
     _ = try ctx.json(body);
+}
+
+fn usersHandler(ctx: *mizu.Context) anyerror!void {
+    _ = try ctx.json(.{ .users = &.{} });
+}
+
+fn createUserHandler(ctx: *mizu.Context) anyerror!void {
+    _ = try ctx.json(.{ .created = true });
+}
+
+fn postsHandler(ctx: *mizu.Context) anyerror!void {
+    _ = try ctx.json(.{ .posts = &.{} });
+}
+
+fn postHandler(ctx: *mizu.Context) anyerror!void {
+    const id = ctx.param("id") orelse "0";
+    _ = try ctx.json(.{ .id = id });
 }

@@ -68,14 +68,66 @@ pub const Server = struct {
         try server.addRoute(.head, path, handler);
     }
 
+    pub fn group(server: *Server, prefix: []const u8) RouterGroup {
+        return .{ .server = server, .prefix = prefix };
+    }
+
+    pub const RouterGroup = struct {
+        server: *Server,
+        prefix: []const u8,
+
+        pub fn get(self: RouterGroup, path: []const u8, handler: Handler) !void {
+            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
+            try self.server.addRoute(.get, full_path, handler);
+        }
+
+        pub fn post(self: RouterGroup, path: []const u8, handler: Handler) !void {
+            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
+            try self.server.addRoute(.post, full_path, handler);
+        }
+
+        pub fn put(self: RouterGroup, path: []const u8, handler: Handler) !void {
+            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
+            try self.server.addRoute(.put, full_path, handler);
+        }
+
+        pub fn delete(self: RouterGroup, path: []const u8, handler: Handler) !void {
+            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
+            try self.server.addRoute(.delete, full_path, handler);
+        }
+
+        pub fn patch(self: RouterGroup, path: []const u8, handler: Handler) !void {
+            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
+            try self.server.addRoute(.patch, full_path, handler);
+        }
+
+        pub fn options(self: RouterGroup, path: []const u8, handler: Handler) !void {
+            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
+            try self.server.addRoute(.options, full_path, handler);
+        }
+
+        pub fn head(self: RouterGroup, path: []const u8, handler: Handler) !void {
+            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
+            try self.server.addRoute(.head, full_path, handler);
+        }
+
+        pub fn group(self: RouterGroup, sub_prefix: []const u8) !RouterGroup {
+            const new_prefix = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, sub_prefix });
+            return .{
+                .server = self.server,
+                .prefix = new_prefix,
+            };
+        }
+    };
+
     pub fn listen(server: *Server, address: Io.net.IpAddress) !void {
         var net_server = try Io.net.IpAddress.listen(&address, server.io, .{});
         defer net_server.deinit(server.io);
 
         std.log.info("Server listening on http://127.0.0.1:8080", .{});
 
-        var group: Io.Group = .init;
-        defer group.deinit(server.io);
+        var io_group: Io.Group = .init;
+        defer io_group.deinit(server.io);
 
         while (true) {
             const stream = net_server.accept(server.io) catch |err| {
@@ -83,7 +135,7 @@ pub const Server = struct {
                 continue;
             };
 
-            group.async(server.io, handleConnectionAsync, .{
+            io_group.async(server.io, handleConnectionAsync, .{
                 server,
                 stream,
             });
