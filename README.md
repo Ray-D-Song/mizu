@@ -8,39 +8,34 @@ Built on top of Zig's new [I/O as an Interface](https://ziglang.org/download/0.1
 
 ```zig
 const std = @import("std");
+const Io = std.Io;
 const mizu = @import("mizu");
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
-    var server = try zray.Server.init(gpa, io);
+    var server = try mizu.Server.init(gpa, io);
     defer server.deinit();
 
-    try server.get("/", indexHandler);
-    try server.get("/hello/:name", helloHandler);
-    try server.post("/echo", echoHandler);
+    try server.get("/", handler);
 
     const address = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(8080) };
     try server.listen(address);
 }
 
-fn indexHandler(ctx: *zray.Context) !void {
-    try ctx.html("<h1>Welcome to Zray!</h1>");
-}
-
-fn helloHandler(ctx: *zray.Context) !void {
-    const name = ctx.param("name") orelse "World";
-    var buf: [100]u8 = undefined;
-    const msg = try std.fmt.bufPrint(&buf, "Hello, {s}!", .{name});
-    try ctx.text(msg);
-}
-
-fn echoHandler(ctx: *zray.Context) !void {
-    const body = try ctx.body();
-    try ctx.json(body);
+fn handler(ctx: *mizu.Context) anyerror!void {
+    try ctx.json(.{ .message = "Hello Mizu!" });
 }
 ```
+
+## Architecture
+
+Mizu uses Zig 0.16's new IO features:
+
+- **Io.Group.async** - Handles each connection asynchronously
+- **Io.net.Stream** - Modern network stream API
+- **Io.Reader/Io.Writer** - Interface-based I/O
 
 ## Context Methods
 
@@ -49,7 +44,7 @@ fn echoHandler(ctx: *zray.Context) !void {
 ```zig
 try ctx.text("Hello");           // text/plain
 try ctx.html("<h1>Title</h1>"); // text/html
-try ctx.json("{\"key\":\"value\"}"); // application/json
+try ctx.json(.{ .key = "value" }); // anonymous struct -> json
 try ctx.raw(bytes, "application/octet-stream");
 try ctx.status(.not_found);
 ```

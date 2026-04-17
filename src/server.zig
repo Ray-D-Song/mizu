@@ -105,12 +105,10 @@ pub const Server = struct {
         var stream_writer = stream.writer(server.io, &server.write_buffer);
 
         var http_server = std.http.Server.init(&stream_reader.interface, &stream_writer.interface);
-        server.handleConnection(&http_server) catch |err| {
-            std.log.err("connection error: {s}", .{@errorName(err)});
-        };
-    }
 
-    fn handleConnection(server: *Server, http_server: *std.http.Server) !void {
+        var ctx: Context = undefined;
+        _ = &ctx;
+
         while (true) {
             var request = http_server.receiveHead() catch |err| {
                 switch (err) {
@@ -122,33 +120,40 @@ pub const Server = struct {
                 }
             };
 
-            var ctx = Context{
+            ctx = Context{
                 .request = &request,
                 .io = server.io,
                 .allocator = server.allocator,
                 .response_sent = false,
             };
 
-            const matched = server.dispatch(&ctx) catch |err| {
-                std.log.err("handler error: {s}", .{@errorName(err)});
+            var matched = false;
+            matched = server.dispatch(&ctx) catch |err| {
+                std.log.err("dispatch error: {s}", .{@errorName(err)});
                 return;
             };
 
             if (!ctx.response_sent) {
                 if (matched) {
-                    try request.respond("Not Found", .{
+                    request.respond("Not Found", .{
                         .status = .not_found,
-                    });
+                    }) catch |err| {
+                        std.log.err("respond error: {s}", .{@errorName(err)});
+                        return;
+                    };
                 } else {
-                    try request.respond("Not Found", .{
+                    request.respond("Not Found", .{
                         .status = .not_found,
-                    });
+                    }) catch |err| {
+                        std.log.err("respond error: {s}", .{@errorName(err)});
+                        return;
+                    };
                 }
             }
         }
     }
 
-    fn dispatch(server: *Server, ctx: *Context) !bool {
+    fn dispatch(server: *Server, ctx: *Context) anyerror!bool {
         const method: Method = switch (ctx.request.head.method) {
             .GET => .get,
             .POST => .post,
@@ -168,12 +173,16 @@ pub const Server = struct {
                 if (std.mem.eql(u8, route.path, path)) {
                     ctx.param_value = null;
                     ctx.param_match_value = null;
-                    try route.handler(ctx);
+                    route.handler(ctx) catch |err| {
+                        std.log.err("handler error: {s}", .{@errorName(err)});
+                    };
                     return true;
                 }
 
                 if (matchPathWithParams(route.path, path, ctx)) {
-                    try route.handler(ctx);
+                    route.handler(ctx) catch |err| {
+                        std.log.err("handler error: {s}", .{@errorName(err)});
+                    };
                     return true;
                 }
             }
@@ -214,7 +223,7 @@ pub const Context = struct {
     param_value: ?[]const u8 = null,
     param_match_value: ?[]const u8 = null,
 
-    pub fn text(ctx: *Context, content: []const u8) !void {
+    pub fn text(ctx: *Context, content: []const u8) anyerror!void {
         try ctx.request.respond(content, .{
             .status = .ok,
             .extra_headers = &.{
@@ -224,8 +233,11 @@ pub const Context = struct {
         ctx.response_sent = true;
     }
 
-    pub fn json(ctx: *Context, content: []const u8) !void {
-        try ctx.request.respond(content, .{
+    pub fn json(ctx: *Context, value: anytype) anyerror!void {
+        const json_str = try std.json.Stringify.valueAlloc(ctx.allocator, value, .{});
+        defer ctx.allocator.free(json_str);
+
+        try ctx.request.respond(json_str, .{
             .status = .ok,
             .extra_headers = &.{
                 .{ .name = "content-type", .value = "application/json" },
@@ -234,7 +246,7 @@ pub const Context = struct {
         ctx.response_sent = true;
     }
 
-    pub fn html(ctx: *Context, content: []const u8) !void {
+    pub fn html(ctx: *Context, content: []const u8) anyerror!void {
         try ctx.request.respond(content, .{
             .status = .ok,
             .extra_headers = &.{
@@ -244,7 +256,7 @@ pub const Context = struct {
         ctx.response_sent = true;
     }
 
-    pub fn raw(ctx: *Context, content: []const u8, content_type: []const u8) !void {
+    pub fn raw(ctx: *Context, content: []const u8, content_type: []const u8) anyerror!void {
         try ctx.request.respond(content, .{
             .status = .ok,
             .extra_headers = &.{
@@ -254,14 +266,14 @@ pub const Context = struct {
         ctx.response_sent = true;
     }
 
-    pub fn notFound(ctx: *Context, content: []const u8) !void {
+    pub fn notFound(ctx: *Context, content: []const u8) anyerror!void {
         try ctx.request.respond(content, .{
             .status = .not_found,
         });
         ctx.response_sent = true;
     }
 
-    pub fn status(ctx: *Context, code: std.http.Status) !void {
+    pub fn status(ctx: *Context, code: std.http.Status) anyerror!void {
         const phrase = code.phrase() orelse "";
         try ctx.request.respond(phrase, .{
             .status = code,
@@ -293,7 +305,7 @@ pub const Context = struct {
         return null;
     }
 
-    pub fn body(ctx: *Context) ![]const u8 {
+    pub fn body(ctx: *Context) anyerror![]const u8 {
         const len = ctx.request.head.content_length orelse return "";
         if (len == 0) return "";
 

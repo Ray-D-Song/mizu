@@ -18,18 +18,18 @@ pub fn main(init: std.process.Init) !void {
     try server.listen(address);
 }
 
-fn indexHandler(ctx: *mizu.Context) !void {
-    try ctx.html("<h1>Welcome to Mizu!</h1><p>A DX-friendly, tiny HTTP framework.</p>");
+fn indexHandler(ctx: *mizu.Context) anyerror!void {
+    _ = try ctx.html("<h1>Welcome to Mizu!</h1><p>A DX-friendly, tiny HTTP framework.</p>");
 }
 
-fn helloHandler(ctx: *mizu.Context) !void {
+fn helloHandler(ctx: *mizu.Context) anyerror!void {
     const name = ctx.param("name") orelse "World";
     var buf: [100]u8 = undefined;
     const msg = try std.fmt.bufPrint(&buf, "Hello, {s}!", .{name});
-    try ctx.text(msg);
+    _ = try ctx.text(msg);
 }
 
-fn echoHandler(ctx: *mizu.Context) !void {
+fn echoHandler(ctx: *mizu.Context) anyerror!void {
     const body = try ctx.body();
-    try ctx.json(body);
+    _ = try ctx.json(body);
 }
