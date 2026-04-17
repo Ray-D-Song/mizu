@@ -18,7 +18,9 @@ pub fn main(init: std.process.Init) !void {
     var server = try mizu.Server.init(gpa, io);
     defer server.deinit();
 
+    try server.use(logger);
     try server.get("/", handler);
+    try server.get("/protected", .{ requireApiKey, protectedHandler });
 
     const address = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(8080) };
     try server.listen(address);
@@ -26,6 +28,27 @@ pub fn main(init: std.process.Init) !void {
 
 fn handler(ctx: *mizu.Context) anyerror!void {
     try ctx.json(.{ .message = "Hello Mizu!" });
+}
+
+fn protectedHandler(ctx: *mizu.Context) anyerror!void {
+    try ctx.text("ok");
+}
+
+fn logger(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
+    std.log.info("{s} {s}", .{
+        @tagName(ctx.request.head.method),
+        ctx.request.head.target,
+    });
+    try next.run();
+}
+
+fn requireApiKey(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
+    if (ctx.header("x-api-key") == null) {
+        try ctx.status(.unauthorized);
+        return;
+    }
+
+    try next.run();
 }
 ```
 
@@ -52,10 +75,38 @@ try ctx.status(.not_found);
 ### Request Helpers
 
 ```zig
-const name = ctx.param("name");     // URL path parameter
+const id = ctx.param("id");         // URL path parameter
+const postId = ctx.param("post_id"); // Multiple params are supported
 const value = ctx.query("key");      // Query string parameter
 const body = try ctx.body();        // Request body
 const header = ctx.header("Content-Type"); // Request header
+```
+
+## Middleware
+
+```zig
+try server.use(logger);
+try server.use(.{ "/api/*", logger });
+
+var api = server.group("/api");
+try api.use(authMiddleware);
+
+try server.get("/dashboard", .{ authMiddleware, dashboardHandler });
+try server.post("/posts/*", requireJsonMiddleware); // method-scoped middleware
+try server.post("/posts", createPostHandler);
+```
+
+Middleware signatures use `*mizu.Next`:
+
+```zig
+fn authMiddleware(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
+    if (ctx.header("authorization") == null) {
+        try ctx.status(.unauthorized);
+        return;
+    }
+
+    try next.run();
+}
 ```
 
 ## Routing
@@ -72,6 +123,7 @@ try server.get("/articles/:year/:month", handler);
 // Route groups
 var api = server.group("/api");
 try api.get("/users", handler); // /api/users
+try api.use(authMiddleware);    // applies to /api/* routes
 
 var v1 = server.group("/v1");
 var posts = try v1.group("/posts");

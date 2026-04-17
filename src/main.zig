@@ -10,13 +10,16 @@ pub fn main(init: std.process.Init) !void {
     var server = try mizu.Server.init(gpa, io);
     defer server.deinit();
 
+    try server.use(requestLogger);
     try server.get("/", indexHandler);
     try server.get("/hello/:name", helloHandler);
     try server.post("/echo", echoHandler);
+    try server.get("/protected", .{ requireApiKey, protectedHandler });
 
     var api = server.group("/api");
+    try api.use(apiLogger);
     try api.get("/users", usersHandler);
-    try api.post("/users", createUserHandler);
+    try api.post("/users", .{ requireJson, createUserHandler });
     try api.onErr(apiErrorHandler);
     try api.get("/error", errorHandler);
 
@@ -41,6 +44,10 @@ fn helloHandler(ctx: *mizu.Context) anyerror!void {
 fn echoHandler(ctx: *mizu.Context) anyerror!void {
     const body = try ctx.body();
     _ = try ctx.json(body);
+}
+
+fn protectedHandler(ctx: *mizu.Context) anyerror!void {
+    _ = try ctx.json(.{ .ok = true });
 }
 
 fn usersHandler(ctx: *mizu.Context) anyerror!void {
@@ -69,4 +76,36 @@ fn apiErrorHandler(_: *mizu.Context, _: anyerror) anyerror!void {
 fn errorHandler(ctx: *mizu.Context) anyerror!void {
     _ = ctx;
     return error.TestError;
+}
+
+fn requestLogger(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
+    std.log.info("{s} {s}", .{
+        @tagName(ctx.request.head.method),
+        ctx.request.head.target,
+    });
+    try next.run();
+}
+
+fn apiLogger(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
+    std.log.info("api -> {s}", .{ctx.request.head.target});
+    try next.run();
+}
+
+fn requireApiKey(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
+    if (ctx.header("x-api-key") == null) {
+        try ctx.status(.unauthorized);
+        return;
+    }
+
+    try next.run();
+}
+
+fn requireJson(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
+    const content_type = ctx.header("content-type") orelse "";
+    if (std.mem.indexOf(u8, content_type, "application/json") == null) {
+        try ctx.status(.unsupported_media_type);
+        return;
+    }
+
+    try next.run();
 }

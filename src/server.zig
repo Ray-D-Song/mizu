@@ -12,14 +12,83 @@ pub const Server = struct {
         head,
     };
 
+    const Param = struct {
+        name: []const u8,
+        value: []const u8,
+    };
+
+    const ParamStore = struct {
+        items: [16]Param = undefined,
+        len: usize = 0,
+
+        fn put(params: *ParamStore, name: []const u8, value: []const u8) void {
+            for (params.items[0..params.len]) |*item| {
+                if (std.mem.eql(u8, item.name, name)) {
+                    item.value = value;
+                    return;
+                }
+            }
+
+            if (params.len == params.items.len) return;
+
+            params.items[params.len] = .{
+                .name = name,
+                .value = value,
+            };
+            params.len += 1;
+        }
+
+        fn merge(params: *ParamStore, other: ParamStore) void {
+            for (other.items[0..other.len]) |item| {
+                params.put(item.name, item.value);
+            }
+        }
+    };
+
     pub const Handler = *const fn (ctx: *Context) anyerror!void;
+
+    pub const Next = struct {
+        ctx: *Context,
+        middlewares: []const Middleware,
+        handler: ?Handler,
+        index: usize = 0,
+
+        pub fn run(next: *Next) anyerror!void {
+            if (next.index < next.middlewares.len) {
+                const middleware = next.middlewares[next.index];
+                var downstream = next.*;
+                downstream.index += 1;
+                try middleware(next.ctx, &downstream);
+                return;
+            }
+
+            if (next.handler) |handler| {
+                try handler(next.ctx);
+            }
+        }
+    };
+
+    pub const Middleware = *const fn (ctx: *Context, next: *Next) anyerror!void;
     pub const ErrorHandler = *const fn (ctx: *Context, err: anyerror) anyerror!void;
 
     pub const Route = struct {
-        method: Method,
+        method: ?Method,
         path: []const u8,
-        handler: Handler,
+        owns_path: bool,
+        middlewares: []Middleware,
+        handler: ?Handler,
         group: ?*RouterGroup,
+    };
+
+    const RouteCallbacks = struct {
+        middlewares: []Middleware,
+        handler: ?Handler,
+    };
+
+    const UseCallbacks = struct {
+        path: []const u8,
+        owns_path: bool,
+        middlewares: []Middleware,
     };
 
     allocator: std.mem.Allocator,
@@ -41,6 +110,13 @@ pub const Server = struct {
     }
 
     pub fn deinit(server: *Server) void {
+        for (server.routes.items) |route| {
+            if (route.owns_path) {
+                server.allocator.free(route.path);
+            }
+            server.allocator.free(route.middlewares);
+        }
+
         server.routes.deinit(server.allocator);
         server.error_handlers.deinit(server.allocator);
     }
@@ -49,41 +125,46 @@ pub const Server = struct {
         try server.error_handlers.append(server.allocator, handler);
     }
 
-    pub fn get(server: *Server, path: []const u8, handler: Handler) !void {
-        try server.addRoute(.get, path, handler);
+    pub fn use(server: *Server, callbacks: anytype) !void {
+        try server.addUse(callbacks, null, null);
     }
 
-    pub fn post(server: *Server, path: []const u8, handler: Handler) !void {
-        try server.addRoute(.post, path, handler);
+    pub fn get(server: *Server, path: []const u8, callbacks: anytype) !void {
+        try server.addRoute(.get, path, false, callbacks, null);
     }
 
-    pub fn put(server: *Server, path: []const u8, handler: Handler) !void {
-        try server.addRoute(.put, path, handler);
+    pub fn post(server: *Server, path: []const u8, callbacks: anytype) !void {
+        try server.addRoute(.post, path, false, callbacks, null);
     }
 
-    pub fn delete(server: *Server, path: []const u8, handler: Handler) !void {
-        try server.addRoute(.delete, path, handler);
+    pub fn put(server: *Server, path: []const u8, callbacks: anytype) !void {
+        try server.addRoute(.put, path, false, callbacks, null);
     }
 
-    pub fn patch(server: *Server, path: []const u8, handler: Handler) !void {
-        try server.addRoute(.patch, path, handler);
+    pub fn delete(server: *Server, path: []const u8, callbacks: anytype) !void {
+        try server.addRoute(.delete, path, false, callbacks, null);
     }
 
-    pub fn options(server: *Server, path: []const u8, handler: Handler) !void {
-        try server.addRoute(.options, path, handler);
+    pub fn patch(server: *Server, path: []const u8, callbacks: anytype) !void {
+        try server.addRoute(.patch, path, false, callbacks, null);
     }
 
-    pub fn head(server: *Server, path: []const u8, handler: Handler) !void {
-        try server.addRoute(.head, path, handler);
+    pub fn options(server: *Server, path: []const u8, callbacks: anytype) !void {
+        try server.addRoute(.options, path, false, callbacks, null);
+    }
+
+    pub fn head(server: *Server, path: []const u8, callbacks: anytype) !void {
+        try server.addRoute(.head, path, false, callbacks, null);
     }
 
     pub fn group(server: *Server, prefix: []const u8) *RouterGroup {
+        const handlers = server.allocator.alloc(ErrorHandler, 0) catch unreachable;
         const grp = server.allocator.create(RouterGroup) catch unreachable;
         grp.* = .{
             .server = server,
             .prefix = prefix,
             .parent = null,
-            .error_handlers = &.{},
+            .error_handlers = handlers,
         };
         return grp;
     }
@@ -94,49 +175,65 @@ pub const Server = struct {
         parent: ?*RouterGroup,
         error_handlers: []ErrorHandler,
 
-        pub fn get(self: *RouterGroup, path: []const u8, handler: Handler) !void {
-            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRouteWithGroup(.get, full_path, handler, self);
+        pub fn use(self: *RouterGroup, callbacks: anytype) !void {
+            try self.server.addUse(callbacks, self.prefix, self);
         }
 
-        pub fn post(self: *RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn get(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRouteWithGroup(.post, full_path, handler, self);
+            errdefer self.server.allocator.free(full_path);
+            try self.server.addRoute(.get, full_path, true, callbacks, self);
         }
 
-        pub fn put(self: *RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn post(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRouteWithGroup(.put, full_path, handler, self);
+            errdefer self.server.allocator.free(full_path);
+            try self.server.addRoute(.post, full_path, true, callbacks, self);
         }
 
-        pub fn delete(self: *RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn put(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRouteWithGroup(.delete, full_path, handler, self);
+            errdefer self.server.allocator.free(full_path);
+            try self.server.addRoute(.put, full_path, true, callbacks, self);
         }
 
-        pub fn patch(self: *RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn delete(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRouteWithGroup(.patch, full_path, handler, self);
+            errdefer self.server.allocator.free(full_path);
+            try self.server.addRoute(.delete, full_path, true, callbacks, self);
         }
 
-        pub fn options(self: *RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn patch(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRouteWithGroup(.options, full_path, handler, self);
+            errdefer self.server.allocator.free(full_path);
+            try self.server.addRoute(.patch, full_path, true, callbacks, self);
         }
 
-        pub fn head(self: *RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn options(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRouteWithGroup(.head, full_path, handler, self);
+            errdefer self.server.allocator.free(full_path);
+            try self.server.addRoute(.options, full_path, true, callbacks, self);
+        }
+
+        pub fn head(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
+            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
+            errdefer self.server.allocator.free(full_path);
+            try self.server.addRoute(.head, full_path, true, callbacks, self);
         }
 
         pub fn group(self: *RouterGroup, sub_prefix: []const u8) !*RouterGroup {
             const new_prefix = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, sub_prefix });
+            errdefer self.server.allocator.free(new_prefix);
+
+            const handlers = try self.server.allocator.alloc(ErrorHandler, 0);
+            errdefer self.server.allocator.free(handlers);
+
             const grp = try self.server.allocator.create(RouterGroup);
             grp.* = .{
                 .server = self.server,
                 .prefix = new_prefix,
                 .parent = self,
-                .error_handlers = &.{},
+                .error_handlers = handlers,
             };
             return grp;
         }
@@ -170,20 +267,35 @@ pub const Server = struct {
         }
     }
 
-    fn addRoute(server: *Server, method: Method, path: []const u8, handler: Handler) !void {
+    fn addRoute(server: *Server, method: Method, path: []const u8, owns_path: bool, callbacks: anytype, grp: ?*RouterGroup) !void {
+        const route_callbacks = try server.normalizeRouteCallbacks(callbacks);
+        errdefer server.allocator.free(route_callbacks.middlewares);
+
         try server.routes.append(server.allocator, .{
             .method = method,
             .path = path,
-            .handler = handler,
-            .group = null,
+            .owns_path = owns_path,
+            .middlewares = route_callbacks.middlewares,
+            .handler = route_callbacks.handler,
+            .group = grp,
         });
     }
 
-    fn addRouteWithGroup(server: *Server, method: Method, path: []const u8, handler: Handler, grp: *RouterGroup) !void {
+    fn addUse(server: *Server, callbacks: anytype, prefix: ?[]const u8, grp: ?*RouterGroup) !void {
+        const use_callbacks = try server.normalizeUseCallbacks(callbacks, prefix);
+        errdefer {
+            if (use_callbacks.owns_path) {
+                server.allocator.free(use_callbacks.path);
+            }
+            server.allocator.free(use_callbacks.middlewares);
+        }
+
         try server.routes.append(server.allocator, .{
-            .method = method,
-            .path = path,
-            .handler = handler,
+            .method = null,
+            .path = use_callbacks.path,
+            .owns_path = use_callbacks.owns_path,
+            .middlewares = use_callbacks.middlewares,
+            .handler = null,
             .group = grp,
         });
     }
@@ -214,31 +326,22 @@ pub const Server = struct {
                 .request = &request,
                 .io = server.io,
                 .allocator = server.allocator,
-                .response_sent = false,
             };
+            defer ctx.deinit();
 
-            var matched = false;
-            matched = server.dispatch(&ctx) catch |err| {
+            const matched = server.dispatch(&ctx) catch |err| {
                 std.log.err("dispatch error: {s}", .{@errorName(err)});
                 return;
             };
 
             if (!ctx.response_sent) {
-                if (matched) {
-                    request.respond("Not Found", .{
-                        .status = .not_found,
-                    }) catch |err| {
-                        std.log.err("respond error: {s}", .{@errorName(err)});
-                        return;
-                    };
-                } else {
-                    request.respond("Not Found", .{
-                        .status = .not_found,
-                    }) catch |err| {
-                        std.log.err("respond error: {s}", .{@errorName(err)});
-                        return;
-                    };
-                }
+                const status: std.http.Status = if (matched) .not_found else .not_found;
+                request.respond("Not Found", .{
+                    .status = status,
+                }) catch |err| {
+                    std.log.err("respond error: {s}", .{@errorName(err)});
+                    return;
+                };
             }
         }
     }
@@ -258,27 +361,42 @@ pub const Server = struct {
         const target = ctx.request.head.target;
         const path = if (std.mem.indexOfScalar(u8, target, '?')) |q| target[0..q] else target;
 
-        for (server.routes.items) |route| {
-            if (route.method == method) {
-                if (std.mem.eql(u8, route.path, path)) {
-                    ctx.param_value = null;
-                    ctx.param_match_value = null;
-                    server.runHandler(route.handler, ctx, route.group);
-                    return true;
-                }
+        var chain = std.ArrayList(Middleware).initCapacity(server.allocator, 4) catch unreachable;
+        defer chain.deinit(server.allocator);
 
-                if (matchPathWithParams(route.path, path, ctx)) {
-                    server.runHandler(route.handler, ctx, route.group);
-                    return true;
-                }
+        var params = ParamStore{};
+
+        for (server.routes.items) |route| {
+            if (route.method) |route_method| {
+                if (route_method != method) continue;
+            }
+
+            var route_params = ParamStore{};
+            if (!matchPathPattern(route.path, path, &route_params)) continue;
+
+            if (route.middlewares.len > 0) {
+                try chain.appendSlice(server.allocator, route.middlewares);
+            }
+            params.merge(route_params);
+
+            if (route.handler) |handler| {
+                ctx.setParams(params);
+                server.runChain(chain.items, handler, ctx, route.group);
+                return true;
             }
         }
 
         return false;
     }
 
-    fn runHandler(server: *Server, handler: Handler, ctx: *Context, grp: ?*RouterGroup) void {
-        handler(ctx) catch |err| {
+    fn runChain(server: *Server, middlewares: []const Middleware, handler: Handler, ctx: *Context, grp: ?*RouterGroup) void {
+        var next = Next{
+            .ctx = ctx,
+            .middlewares = middlewares,
+            .handler = handler,
+        };
+
+        next.run() catch |err| {
             server.handleError(ctx, err, grp);
         };
     }
@@ -300,22 +418,241 @@ pub const Server = struct {
         }
     }
 
-    fn matchPathWithParams(route_path: []const u8, request_path: []const u8, ctx: *Context) bool {
-        var route_iter = std.mem.splitScalar(u8, route_path, '/');
+    fn normalizeRouteCallbacks(server: *Server, callbacks: anytype) !RouteCallbacks {
+        const T = @TypeOf(callbacks);
+
+        if (comptime isTuple(T)) {
+            return try server.normalizeRouteTuple(callbacks);
+        }
+
+        const kind = comptime callbackKind(T);
+        return switch (kind) {
+            .handler => .{
+                .middlewares = try server.allocator.alloc(Middleware, 0),
+                .handler = callbacks,
+            },
+            .middleware => .{
+                .middlewares = try server.copyMiddlewares(&.{@as(Middleware, callbacks)}),
+                .handler = null,
+            },
+        };
+    }
+
+    fn normalizeRouteTuple(server: *Server, callbacks: anytype) !RouteCallbacks {
+        const fields = std.meta.fields(@TypeOf(callbacks));
+        if (fields.len == 0) {
+            @compileError("Route registration requires at least one handler or middleware.");
+        }
+
+        const last_index = fields.len - 1;
+        const has_handler = comptime callbackKind(@TypeOf(callbacks[last_index])) == .handler;
+        const middleware_count = if (has_handler) last_index else fields.len;
+
+        if (has_handler and comptime callbackKind(fields[last_index].type) != .handler) {
+            @compileError("The last route callback must be a handler.");
+        }
+
+        inline for (0..middleware_count) |index| {
+            if (comptime callbackKind(fields[index].type) != .middleware) {
+                @compileError("Route middlewares must have the signature fn (*Context, *Next) anyerror!void.");
+            }
+        }
+
+        var middlewares = try server.allocator.alloc(Middleware, middleware_count);
+        inline for (0..middleware_count) |index| {
+            middlewares[index] = callbacks[index];
+        }
+
+        return .{
+            .middlewares = middlewares,
+            .handler = if (has_handler) callbacks[last_index] else null,
+        };
+    }
+
+    fn normalizeUseCallbacks(server: *Server, callbacks: anytype, prefix: ?[]const u8) !UseCallbacks {
+        const T = @TypeOf(callbacks);
+
+        if (comptime !isTuple(T)) {
+            const path = try server.scopeMiddlewarePath("*", prefix);
+            return .{
+                .path = path.path,
+                .owns_path = path.owns_path,
+                .middlewares = try server.copyMiddlewares(&.{@as(Middleware, callbacks)}),
+            };
+        }
+
+        const fields = std.meta.fields(T);
+        if (fields.len == 0) {
+            @compileError("use() requires at least one middleware.");
+        }
+
+        const first_is_path = comptime isStringLike(fields[0].type);
+        const middleware_start: usize = if (first_is_path) 1 else 0;
+
+        if (middleware_start == fields.len) {
+            @compileError("use() requires at least one middleware.");
+        }
+
+        inline for (middleware_start..fields.len) |index| {
+            if (comptime callbackKind(fields[index].type) != .middleware) {
+                @compileError("use() only accepts middleware callbacks.");
+            }
+        }
+
+        const base_path = if (first_is_path) asPath(callbacks[0]) else "*";
+        const scoped_path = try server.scopeMiddlewarePath(base_path, prefix);
+        errdefer if (scoped_path.owns_path) server.allocator.free(scoped_path.path);
+
+        var middlewares = try server.allocator.alloc(Middleware, fields.len - middleware_start);
+        errdefer server.allocator.free(middlewares);
+
+        inline for (middleware_start..fields.len, 0..) |index, dest_index| {
+            middlewares[dest_index] = callbacks[index];
+        }
+
+        return .{
+            .path = scoped_path.path,
+            .owns_path = scoped_path.owns_path,
+            .middlewares = middlewares,
+        };
+    }
+
+    fn copyMiddlewares(server: *Server, middlewares: []const Middleware) ![]Middleware {
+        const copy = try server.allocator.alloc(Middleware, middlewares.len);
+        @memcpy(copy, middlewares);
+        return copy;
+    }
+
+    fn scopeMiddlewarePath(server: *Server, base_path: []const u8, prefix: ?[]const u8) !struct { path: []const u8, owns_path: bool } {
+        if (prefix == null) {
+            return .{
+                .path = base_path,
+                .owns_path = false,
+            };
+        }
+
+        if (std.mem.eql(u8, base_path, "*")) {
+            if (std.mem.eql(u8, prefix.?, "/")) {
+                return .{
+                    .path = "*",
+                    .owns_path = false,
+                };
+            }
+
+            return .{
+                .path = try ensureWildcardPath(server.allocator, prefix.?),
+                .owns_path = true,
+            };
+        }
+
+        return .{
+            .path = try std.mem.concat(server.allocator, u8, &.{ prefix.?, base_path }),
+            .owns_path = true,
+        };
+    }
+
+    fn ensureWildcardPath(allocator: std.mem.Allocator, prefix: []const u8) ![]const u8 {
+        if (std.mem.eql(u8, prefix, "/")) {
+            return allocator.dupe(u8, "*");
+        }
+
+        if (std.mem.endsWith(u8, prefix, "/*")) {
+            return allocator.dupe(u8, prefix);
+        }
+
+        if (prefix.len > 0 and prefix[prefix.len - 1] == '/') {
+            return std.mem.concat(allocator, u8, &.{ prefix, "*" });
+        }
+
+        return std.mem.concat(allocator, u8, &.{ prefix, "/*" });
+    }
+
+    const CallbackKind = enum {
+        handler,
+        middleware,
+    };
+
+    fn callbackKind(comptime T: type) CallbackKind {
+        const fn_info = functionInfo(T);
+
+        return switch (fn_info.params.len) {
+            1 => .handler,
+            2 => .middleware,
+            else => @compileError("Callbacks must have the signature fn (*Context) anyerror!void or fn (*Context, *Next) anyerror!void."),
+        };
+    }
+
+    fn functionInfo(comptime T: type) std.builtin.Type.Fn {
+        return switch (@typeInfo(T)) {
+            .@"fn" => |info| info,
+            .pointer => |ptr| switch (@typeInfo(ptr.child)) {
+                .@"fn" => |info| info,
+                else => @compileError("Expected a function pointer."),
+            },
+            else => @compileError("Expected a function."),
+        };
+    }
+
+    fn isTuple(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .@"struct" => |info| info.is_tuple,
+            else => false,
+        };
+    }
+
+    fn isStringLike(comptime T: type) bool {
+        return switch (@typeInfo(T)) {
+            .pointer => |ptr| ptr.size == .slice and ptr.child == u8,
+            .array => |array| array.child == u8,
+            else => blk: {
+                if (@typeInfo(T) == .pointer) {
+                    const ptr = @typeInfo(T).pointer;
+                    switch (@typeInfo(ptr.child)) {
+                        .array => |array| break :blk array.child == u8,
+                        else => break :blk false,
+                    }
+                }
+                break :blk false;
+            },
+        };
+    }
+
+    fn asPath(path: anytype) []const u8 {
+        return switch (@typeInfo(@TypeOf(path))) {
+            .pointer => |ptr| switch (ptr.size) {
+                .slice => path,
+                .one => std.mem.span(path),
+                else => @compileError("Invalid path type."),
+            },
+            .array => path[0..],
+            else => @compileError("Invalid path type."),
+        };
+    }
+
+    fn matchPathPattern(pattern: []const u8, request_path: []const u8, params: *ParamStore) bool {
+        if (std.mem.eql(u8, pattern, "*")) return true;
+
+        var pattern_iter = std.mem.splitScalar(u8, pattern, '/');
         var path_iter = std.mem.splitScalar(u8, request_path, '/');
 
-        while (route_iter.next()) |route_seg| {
+        while (pattern_iter.next()) |pattern_seg| {
+            if (std.mem.eql(u8, pattern_seg, "*")) {
+                return true;
+            }
+
             const path_seg = path_iter.next() orelse return false;
 
-            if (route_seg.len == 0) {
+            if (pattern_seg.len == 0) {
                 if (path_seg.len != 0) return false;
                 continue;
             }
 
-            if (route_seg[0] == ':') {
-                ctx.param_value = route_seg[1..];
-                ctx.param_match_value = path_seg;
-            } else if (!std.mem.eql(u8, route_seg, path_seg)) {
+            if (pattern_seg[0] == ':') {
+                params.put(pattern_seg[1..], path_seg);
+                continue;
+            }
+
+            if (!std.mem.eql(u8, pattern_seg, path_seg)) {
                 return false;
             }
         }
@@ -328,9 +665,23 @@ pub const Context = struct {
     request: *std.http.Server.Request,
     io: Io,
     allocator: std.mem.Allocator,
-    response_sent: bool,
-    param_value: ?[]const u8 = null,
-    param_match_value: ?[]const u8 = null,
+    response_sent: bool = false,
+    params: [16]Server.Param = undefined,
+    param_count: usize = 0,
+    cached_body: ?[]u8 = null,
+
+    fn deinit(ctx: *Context) void {
+        if (ctx.cached_body) |cached| {
+            ctx.allocator.free(cached);
+        }
+    }
+
+    fn setParams(ctx: *Context, params: Server.ParamStore) void {
+        ctx.param_count = params.len;
+        for (params.items[0..params.len], 0..) |item, index| {
+            ctx.params[index] = item;
+        }
+    }
 
     pub fn text(ctx: *Context, content: []const u8) anyerror!void {
         try ctx.request.respond(content, .{
@@ -391,9 +742,12 @@ pub const Context = struct {
     }
 
     pub fn param(ctx: *Context, name: []const u8) ?[]const u8 {
-        if (std.mem.eql(u8, name, ctx.param_value orelse return null)) {
-            return ctx.param_match_value;
+        for (ctx.params[0..ctx.param_count]) |captured_param| {
+            if (std.mem.eql(u8, captured_param.name, name)) {
+                return captured_param.value;
+            }
         }
+
         return null;
     }
 
@@ -415,6 +769,8 @@ pub const Context = struct {
     }
 
     pub fn body(ctx: *Context) anyerror![]const u8 {
+        if (ctx.cached_body) |cached| return cached;
+
         const len = ctx.request.head.content_length orelse return "";
         if (len == 0) return "";
 
@@ -431,6 +787,8 @@ pub const Context = struct {
             const n = try body_reader.readVec(&data);
             remaining = remaining[n..];
         }
+
+        ctx.cached_body = content;
         return content;
     }
 
@@ -444,3 +802,17 @@ pub const Context = struct {
         return null;
     }
 };
+
+test "middleware path wildcard matches exact prefix and children" {
+    var params = Server.ParamStore{};
+    try std.testing.expect(Server.matchPathPattern("/api/*", "/api", &params));
+    try std.testing.expect(Server.matchPathPattern("/api/*", "/api/users", &params));
+    try std.testing.expect(!Server.matchPathPattern("/api/*", "/v1/users", &params));
+}
+
+test "path params are captured across segments" {
+    var params = Server.ParamStore{};
+    try std.testing.expect(Server.matchPathPattern("/users/:id/posts/:post_id", "/users/42/posts/99", &params));
+    try std.testing.expectEqualStrings("42", params.items[0].value);
+    try std.testing.expectEqualStrings("99", params.items[1].value);
+}
