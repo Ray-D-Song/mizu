@@ -78,6 +78,31 @@ var posts = try v1.group("/posts");
 try posts.get("/:id", handler); // /v1/posts/:id
 ```
 
+## Error Handling
+
+```zig
+// Server-level error handler
+// Return void (no error) to stop propagation
+// Return error to propagate to parent
+try server.onErr(serverErrHandler);
+
+fn serverErrHandler(ctx: *mizu.Context, err: anyerror) anyerror!void {
+    try ctx.status(.internal_server_error);
+}
+
+// Group-level error handler
+var api = server.group("/api");
+try api.onErr(apiErrHandler);
+
+fn apiErrHandler(_: *mizu.Context, _: anyerror) anyerror!void {
+    // Handle error, don't return error to stop propagation
+}
+```
+
+- Handler returns `void`: error stays at current layer, not propagated to parent
+- Handler returns `error`: error propagates to parent group or server
+- Multiple handlers execute in registration order, first registered runs first
+
 ## Supported HTTP Methods
 
 - `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `HEAD`

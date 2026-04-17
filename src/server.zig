@@ -13,16 +13,19 @@ pub const Server = struct {
     };
 
     pub const Handler = *const fn (ctx: *Context) anyerror!void;
+    pub const ErrorHandler = *const fn (ctx: *Context, err: anyerror) anyerror!void;
 
     pub const Route = struct {
         method: Method,
         path: []const u8,
         handler: Handler,
+        group: ?*RouterGroup,
     };
 
     allocator: std.mem.Allocator,
     io: Io,
     routes: std.ArrayList(Route),
+    error_handlers: std.ArrayList(ErrorHandler),
     read_buffer: [16384]u8,
     write_buffer: [16384]u8,
 
@@ -31,6 +34,7 @@ pub const Server = struct {
             .allocator = allocator,
             .io = io,
             .routes = try std.ArrayList(Route).initCapacity(allocator, 16),
+            .error_handlers = try std.ArrayList(ErrorHandler).initCapacity(allocator, 4),
             .read_buffer = undefined,
             .write_buffer = undefined,
         };
@@ -38,6 +42,11 @@ pub const Server = struct {
 
     pub fn deinit(server: *Server) void {
         server.routes.deinit(server.allocator);
+        server.error_handlers.deinit(server.allocator);
+    }
+
+    pub fn onErr(server: *Server, handler: ErrorHandler) !void {
+        try server.error_handlers.append(server.allocator, handler);
     }
 
     pub fn get(server: *Server, path: []const u8, handler: Handler) !void {
@@ -68,55 +77,74 @@ pub const Server = struct {
         try server.addRoute(.head, path, handler);
     }
 
-    pub fn group(server: *Server, prefix: []const u8) RouterGroup {
-        return .{ .server = server, .prefix = prefix };
+    pub fn group(server: *Server, prefix: []const u8) *RouterGroup {
+        const grp = server.allocator.create(RouterGroup) catch unreachable;
+        grp.* = .{
+            .server = server,
+            .prefix = prefix,
+            .parent = null,
+            .error_handlers = &.{},
+        };
+        return grp;
     }
 
     pub const RouterGroup = struct {
         server: *Server,
         prefix: []const u8,
+        parent: ?*RouterGroup,
+        error_handlers: []ErrorHandler,
 
-        pub fn get(self: RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn get(self: *RouterGroup, path: []const u8, handler: Handler) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRoute(.get, full_path, handler);
+            try self.server.addRouteWithGroup(.get, full_path, handler, self);
         }
 
-        pub fn post(self: RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn post(self: *RouterGroup, path: []const u8, handler: Handler) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRoute(.post, full_path, handler);
+            try self.server.addRouteWithGroup(.post, full_path, handler, self);
         }
 
-        pub fn put(self: RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn put(self: *RouterGroup, path: []const u8, handler: Handler) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRoute(.put, full_path, handler);
+            try self.server.addRouteWithGroup(.put, full_path, handler, self);
         }
 
-        pub fn delete(self: RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn delete(self: *RouterGroup, path: []const u8, handler: Handler) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRoute(.delete, full_path, handler);
+            try self.server.addRouteWithGroup(.delete, full_path, handler, self);
         }
 
-        pub fn patch(self: RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn patch(self: *RouterGroup, path: []const u8, handler: Handler) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRoute(.patch, full_path, handler);
+            try self.server.addRouteWithGroup(.patch, full_path, handler, self);
         }
 
-        pub fn options(self: RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn options(self: *RouterGroup, path: []const u8, handler: Handler) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRoute(.options, full_path, handler);
+            try self.server.addRouteWithGroup(.options, full_path, handler, self);
         }
 
-        pub fn head(self: RouterGroup, path: []const u8, handler: Handler) !void {
+        pub fn head(self: *RouterGroup, path: []const u8, handler: Handler) !void {
             const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            try self.server.addRoute(.head, full_path, handler);
+            try self.server.addRouteWithGroup(.head, full_path, handler, self);
         }
 
-        pub fn group(self: RouterGroup, sub_prefix: []const u8) !RouterGroup {
+        pub fn group(self: *RouterGroup, sub_prefix: []const u8) !*RouterGroup {
             const new_prefix = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, sub_prefix });
-            return .{
+            const grp = try self.server.allocator.create(RouterGroup);
+            grp.* = .{
                 .server = self.server,
                 .prefix = new_prefix,
+                .parent = self,
+                .error_handlers = &.{},
             };
+            return grp;
+        }
+
+        pub fn onErr(self: *RouterGroup, handler: ErrorHandler) !void {
+            const new_handlers = try self.server.allocator.realloc(self.error_handlers, self.error_handlers.len + 1);
+            new_handlers[new_handlers.len - 1] = handler;
+            self.error_handlers = new_handlers;
         }
     };
 
@@ -147,6 +175,16 @@ pub const Server = struct {
             .method = method,
             .path = path,
             .handler = handler,
+            .group = null,
+        });
+    }
+
+    fn addRouteWithGroup(server: *Server, method: Method, path: []const u8, handler: Handler, grp: *RouterGroup) !void {
+        try server.routes.append(server.allocator, .{
+            .method = method,
+            .path = path,
+            .handler = handler,
+            .group = grp,
         });
     }
 
@@ -225,22 +263,41 @@ pub const Server = struct {
                 if (std.mem.eql(u8, route.path, path)) {
                     ctx.param_value = null;
                     ctx.param_match_value = null;
-                    route.handler(ctx) catch |err| {
-                        std.log.err("handler error: {s}", .{@errorName(err)});
-                    };
+                    server.runHandler(route.handler, ctx, route.group);
                     return true;
                 }
 
                 if (matchPathWithParams(route.path, path, ctx)) {
-                    route.handler(ctx) catch |err| {
-                        std.log.err("handler error: {s}", .{@errorName(err)});
-                    };
+                    server.runHandler(route.handler, ctx, route.group);
                     return true;
                 }
             }
         }
 
         return false;
+    }
+
+    fn runHandler(server: *Server, handler: Handler, ctx: *Context, grp: ?*RouterGroup) void {
+        handler(ctx) catch |err| {
+            server.handleError(ctx, err, grp);
+        };
+    }
+
+    fn handleError(server: *Server, ctx: *Context, err: anyerror, grp: ?*RouterGroup) void {
+        if (grp) |g| {
+            for (g.error_handlers) |h| {
+                h(ctx, err) catch |e| {
+                    server.handleError(ctx, e, g.parent);
+                    return;
+                };
+            }
+        } else {
+            for (server.error_handlers.items) |h| {
+                h(ctx, err) catch |e| {
+                    std.log.err("unhandled error: {s}", .{@errorName(e)});
+                };
+            }
+        }
     }
 
     fn matchPathWithParams(route_path: []const u8, request_path: []const u8, ctx: *Context) bool {
