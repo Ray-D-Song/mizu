@@ -159,6 +159,10 @@ fn apiErrHandler(_: *mizu.Context, _: anyerror) anyerror!void {
 
 - `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `OPTIONS`, `HEAD`
 
+## TODO
+
+- Buffer responses so middleware can safely adjust status codes and headers after `try next.run()`.
+
 ## Requirements
 
 - Zig 0.16.0 or later
