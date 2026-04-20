@@ -18,9 +18,8 @@ pub fn main(init: std.process.Init) !void {
     var server = try mizu.Server.init(gpa, io);
     defer server.deinit();
 
-    try server.use(logger);
-    try server.get("/", handler);
-    try server.get("/protected", .{ requireApiKey, protectedHandler });
+    server.get("/").handle(handler);
+    server.get("/protected").middleware(requireApiKey).handle(protectedHandler);
 
     const address = Io.net.IpAddress{ .ip4 = Io.net.Ip4Address.loopback(8080) };
     try server.listen(address);
@@ -32,14 +31,6 @@ fn handler(ctx: *mizu.Context) anyerror!void {
 
 fn protectedHandler(ctx: *mizu.Context) anyerror!void {
     try ctx.text("ok");
-}
-
-fn logger(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
-    std.log.info("{s} {s}", .{
-        @tagName(ctx.request.head.method),
-        ctx.request.head.target,
-    });
-    try next.run();
 }
 
 fn requireApiKey(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
@@ -85,15 +76,20 @@ const header = ctx.header("Content-Type"); // Request header
 ## Middleware
 
 ```zig
-try server.use(logger);
-try server.use(.{ "/api/*", logger });
-
+// Server-level middleware (applies to all routes)
 var api = server.group("/api");
-try api.use(authMiddleware);
+api.use("*").middleware(logger).register();
 
-try server.get("/dashboard", .{ authMiddleware, dashboardHandler });
-try server.post("/posts/*", requireJsonMiddleware); // method-scoped middleware
-try server.post("/posts", createPostHandler);
+// Route middleware using Builder pattern
+server.get("/dashboard").middleware(auth).handle(dashboardHandler);
+server.post("/posts").middleware(requireJson).handle(createPostHandler);
+
+// Multiple middleware
+server.post("/posts")
+    .middleware(auth)
+    .middleware(rateLimit)
+    .middleware(requireJson)
+    .handle(createPostHandler);
 ```
 
 Middleware signatures use `*mizu.Next`:
@@ -113,21 +109,21 @@ fn authMiddleware(ctx: *mizu.Context, next: *mizu.Next) anyerror!void {
 
 ```zig
 // Static routes
-try server.get("/", handler);
-try server.post("/submit", handler);
+server.get("/", handler);
+server.post("/submit", handler);
 
 // Path parameters (prefixed with :)
-try server.get("/users/:id", handler);
-try server.get("/articles/:year/:month", handler);
+server.get("/users/:id", handler);
+server.get("/articles/:year/:month", handler);
 
 // Route groups
 var api = server.group("/api");
-try api.get("/users", handler); // /api/users
-try api.use(authMiddleware);    // applies to /api/* routes
+api.get("/users", handler); // /api/users
+api.use("*").middleware(authMiddleware); // applies to /api/*
 
 var v1 = server.group("/v1");
-var posts = try v1.group("/posts");
-try posts.get("/:id", handler); // /v1/posts/:id
+var posts = v1.group("/posts");
+posts.get("/:id", handler); // /v1/posts/:id
 ```
 
 ## Error Handling

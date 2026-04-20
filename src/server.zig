@@ -85,6 +85,184 @@ pub const Server = struct {
         handler: ?Handler,
     };
 
+    pub const RouteBuilder = struct {
+        server: *Server,
+        method: Method,
+        path: []const u8,
+        owns_path: bool,
+        middlewares: []Middleware = &.{},
+        handler: ?Handler = null,
+        group: ?*RouterGroup = null,
+
+        pub fn middleware(self: *RouteBuilder, mw: Middleware) *RouteBuilder {
+            self.middlewares = self.server.appendMiddlewares(self.middlewares, mw);
+            return self;
+        }
+
+        pub fn handle(self: *RouteBuilder, h: Handler) void {
+            self.server.routes.append(self.server.allocator, .{
+                .method = self.method,
+                .path = self.path,
+                .owns_path = self.owns_path,
+                .middlewares = self.middlewares,
+                .handler = h,
+                .group = self.group,
+            }) catch unreachable;
+        }
+
+        pub fn register(self: *RouteBuilder) void {
+            self.server.routes.append(self.server.allocator, .{
+                .method = self.method,
+                .path = self.path,
+                .owns_path = self.owns_path,
+                .middlewares = self.middlewares,
+                .handler = null,
+                .group = self.group,
+            }) catch unreachable;
+        }
+
+        fn appendMiddlewares(self: *RouteBuilder, initial: []Middleware, mw: Middleware) []Middleware {
+            var result = self.server.allocator.alloc(Middleware, initial.len + 1) catch unreachable;
+            @memcpy(result[0..initial.len], initial);
+            result[initial.len] = mw;
+            return result;
+        }
+    };
+
+    pub const GroupBuilder = struct {
+        server: *Server,
+        prefix: []const u8,
+        path: ?[]const u8 = null,
+        method: ?Method = null,
+        owns_path: bool = false,
+        middlewares: []Middleware = &.{},
+        has_handler: bool = false,
+        handler: ?Handler = null,
+        group: *RouterGroup,
+
+        pub fn use(self: *GroupBuilder, mw: Middleware) void {
+            const new_mws = self.server.appendMiddlewares(self.middlewares, mw);
+            self.server.routes.append(self.server.allocator, .{
+                .method = null,
+                .path = "*",
+                .owns_path = false,
+                .middlewares = new_mws,
+                .handler = null,
+                .group = self.group,
+            }) catch unreachable;
+        }
+
+        pub fn get(self: *GroupBuilder, path: []const u8) *GroupBuilder {
+            self.method = .get;
+            self.path = self.combinePath(path);
+            return self;
+        }
+
+        pub fn post(self: *GroupBuilder, path: []const u8) *GroupBuilder {
+            self.method = .post;
+            self.path = self.combinePath(path);
+            return self;
+        }
+
+        pub fn put(self: *GroupBuilder, path: []const u8) *GroupBuilder {
+            self.method = .put;
+            self.path = self.combinePath(path);
+            return self;
+        }
+
+        pub fn delete(self: *GroupBuilder, path: []const u8) *GroupBuilder {
+            self.method = .delete;
+            self.path = self.combinePath(path);
+            return self;
+        }
+
+        pub fn patch(self: *GroupBuilder, path: []const u8) *GroupBuilder {
+            self.method = .patch;
+            self.path = self.combinePath(path);
+            return self;
+        }
+
+        pub fn options(self: *GroupBuilder, path: []const u8) *GroupBuilder {
+            self.method = .options;
+            self.path = self.combinePath(path);
+            return self;
+        }
+
+        pub fn head(self: *GroupBuilder, path: []const u8) *GroupBuilder {
+            self.method = .head;
+            self.path = self.combinePath(path);
+            return self;
+        }
+
+        pub fn middleware(self: *GroupBuilder, mw: Middleware) *GroupBuilder {
+            self.middlewares = self.server.appendMiddlewares(self.middlewares, mw);
+            return self;
+        }
+
+        pub fn handle(self: *GroupBuilder, h: Handler) void {
+            self.server.routes.append(self.server.allocator, .{
+                .method = self.method,
+                .path = self.path.?,
+                .owns_path = self.owns_path,
+                .middlewares = self.middlewares,
+                .handler = h,
+                .group = self.group,
+            }) catch unreachable;
+        }
+
+        pub fn register(self: *GroupBuilder) void {
+            self.server.routes.append(self.server.allocator, .{
+                .method = self.method,
+                .path = self.path.?,
+                .owns_path = self.owns_path,
+                .middlewares = self.middlewares,
+                .handler = self.handler,
+                .group = self.group,
+            }) catch unreachable;
+        }
+
+        fn combinePath(self: *GroupBuilder, path: []const u8) []const u8 {
+            return std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path }) catch unreachable;
+        }
+
+        fn appendMiddlewares(self: *GroupBuilder, initial: []Middleware, mw: Middleware) []Middleware {
+            var result = self.server.allocator.alloc(Middleware, initial.len + 1) catch unreachable;
+            @memcpy(result[0..initial.len], initial);
+            result[initial.len] = mw;
+            return result;
+        }
+    };
+
+    pub const GroupUseBuilder = struct {
+        server: *Server,
+        prefix: []const u8,
+        middlewares: []Middleware = &.{},
+        group: *RouterGroup,
+
+        pub fn middleware(self: *GroupUseBuilder, mw: Middleware) *GroupUseBuilder {
+            self.middlewares = self.server.appendMiddlewares(self.middlewares, mw);
+            return self;
+        }
+
+        pub fn register(self: *GroupUseBuilder) void {
+            self.server.routes.append(self.server.allocator, .{
+                .method = null,
+                .path = self.prefix,
+                .owns_path = false,
+                .middlewares = self.middlewares,
+                .handler = null,
+                .group = self.group,
+            }) catch unreachable;
+        }
+
+        fn appendMiddlewares(self: *GroupUseBuilder, initial: []Middleware, mw: Middleware) []Middleware {
+            var result = self.server.allocator.alloc(Middleware, initial.len + 1) catch unreachable;
+            @memcpy(result[0..initial.len], initial);
+            result[initial.len] = mw;
+            return result;
+        }
+    };
+
     const UseCallbacks = struct {
         path: []const u8,
         owns_path: bool,
@@ -129,36 +307,92 @@ pub const Server = struct {
         try server.addUse(callbacks, null, null);
     }
 
-    pub fn get(server: *Server, path: []const u8, callbacks: anytype) !void {
-        try server.addRoute(.get, path, false, callbacks, null);
+    pub fn get(server: *Server, path: []const u8) *RouteBuilder {
+        const builder = server.allocator.create(RouteBuilder) catch unreachable;
+        builder.* = .{
+            .server = server,
+            .method = .get,
+            .path = path,
+            .owns_path = false,
+        };
+        return builder;
     }
 
-    pub fn post(server: *Server, path: []const u8, callbacks: anytype) !void {
-        try server.addRoute(.post, path, false, callbacks, null);
+    pub fn post(server: *Server, path: []const u8) *RouteBuilder {
+        const builder = server.allocator.create(RouteBuilder) catch unreachable;
+        builder.* = .{
+            .server = server,
+            .method = .post,
+            .path = path,
+            .owns_path = false,
+        };
+        return builder;
     }
 
-    pub fn put(server: *Server, path: []const u8, callbacks: anytype) !void {
-        try server.addRoute(.put, path, false, callbacks, null);
+    pub fn put(server: *Server, path: []const u8) *RouteBuilder {
+        const builder = server.allocator.create(RouteBuilder) catch unreachable;
+        builder.* = .{
+            .server = server,
+            .method = .put,
+            .path = path,
+            .owns_path = false,
+        };
+        return builder;
     }
 
-    pub fn delete(server: *Server, path: []const u8, callbacks: anytype) !void {
-        try server.addRoute(.delete, path, false, callbacks, null);
+    pub fn delete(server: *Server, path: []const u8) *RouteBuilder {
+        const builder = server.allocator.create(RouteBuilder) catch unreachable;
+        builder.* = .{
+            .server = server,
+            .method = .delete,
+            .path = path,
+            .owns_path = false,
+        };
+        return builder;
     }
 
-    pub fn patch(server: *Server, path: []const u8, callbacks: anytype) !void {
-        try server.addRoute(.patch, path, false, callbacks, null);
+    pub fn patch(server: *Server, path: []const u8) *RouteBuilder {
+        const builder = server.allocator.create(RouteBuilder) catch unreachable;
+        builder.* = .{
+            .server = server,
+            .method = .patch,
+            .path = path,
+            .owns_path = false,
+        };
+        return builder;
     }
 
-    pub fn options(server: *Server, path: []const u8, callbacks: anytype) !void {
-        try server.addRoute(.options, path, false, callbacks, null);
+    pub fn options(server: *Server, path: []const u8) *RouteBuilder {
+        const builder = server.allocator.create(RouteBuilder) catch unreachable;
+        builder.* = .{
+            .server = server,
+            .method = .options,
+            .path = path,
+            .owns_path = false,
+        };
+        return builder;
     }
 
-    pub fn head(server: *Server, path: []const u8, callbacks: anytype) !void {
-        try server.addRoute(.head, path, false, callbacks, null);
+    pub fn head(server: *Server, path: []const u8) *RouteBuilder {
+        const builder = server.allocator.create(RouteBuilder) catch unreachable;
+        builder.* = .{
+            .server = server,
+            .method = .head,
+            .path = path,
+            .owns_path = false,
+        };
+        return builder;
+    }
+
+    fn appendMiddlewares(server: *Server, initial: []Middleware, mw: Middleware) []Middleware {
+        var result = server.allocator.alloc(Middleware, initial.len + 1) catch unreachable;
+        @memcpy(result[0..initial.len], initial);
+        result[initial.len] = mw;
+        return result;
     }
 
     pub fn group(server: *Server, prefix: []const u8) *RouterGroup {
-        const handlers = server.allocator.alloc(ErrorHandler, 0) catch unreachable;
+        const handlers = std.ArrayList(ErrorHandler).initCapacity(server.allocator, 4) catch unreachable;
         const grp = server.allocator.create(RouterGroup) catch unreachable;
         grp.* = .{
             .server = server,
@@ -173,60 +407,115 @@ pub const Server = struct {
         server: *Server,
         prefix: []const u8,
         parent: ?*RouterGroup,
-        error_handlers: []ErrorHandler,
+        error_handlers: std.ArrayList(ErrorHandler),
 
-        pub fn use(self: *RouterGroup, callbacks: anytype) !void {
-            try self.server.addUse(callbacks, self.prefix, self);
+        pub fn use(self: *RouterGroup, path: []const u8) *GroupUseBuilder {
+            const builder = self.server.allocator.create(GroupUseBuilder) catch unreachable;
+            builder.* = .{
+                .server = self.server,
+                .prefix = path,
+                .middlewares = &.{},
+                .group = self,
+            };
+            return builder;
         }
 
-        pub fn get(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
-            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            errdefer self.server.allocator.free(full_path);
-            try self.server.addRoute(.get, full_path, true, callbacks, self);
+        pub fn get(self: *RouterGroup, path: []const u8) *GroupBuilder {
+            const builder = self.server.allocator.create(GroupBuilder) catch unreachable;
+            builder.* = .{
+                .server = self.server,
+                .prefix = self.prefix,
+                .path = std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path }) catch unreachable,
+                .method = .get,
+                .middlewares = &.{},
+                .group = self,
+            };
+            return builder;
         }
 
-        pub fn post(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
-            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            errdefer self.server.allocator.free(full_path);
-            try self.server.addRoute(.post, full_path, true, callbacks, self);
+        pub fn post(self: *RouterGroup, path: []const u8) *GroupBuilder {
+            const builder = self.server.allocator.create(GroupBuilder) catch unreachable;
+            builder.* = .{
+                .server = self.server,
+                .prefix = self.prefix,
+                .path = std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path }) catch unreachable,
+                .method = .post,
+                .middlewares = &.{},
+                .group = self,
+            };
+            return builder;
         }
 
-        pub fn put(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
-            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            errdefer self.server.allocator.free(full_path);
-            try self.server.addRoute(.put, full_path, true, callbacks, self);
+        pub fn put(self: *RouterGroup, path: []const u8) *GroupBuilder {
+            const builder = self.server.allocator.create(GroupBuilder) catch unreachable;
+            builder.* = .{
+                .server = self.server,
+                .prefix = self.prefix,
+                .path = std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path }) catch unreachable,
+                .method = .put,
+                .middlewares = &.{},
+                .group = self,
+            };
+            return builder;
         }
 
-        pub fn delete(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
-            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            errdefer self.server.allocator.free(full_path);
-            try self.server.addRoute(.delete, full_path, true, callbacks, self);
+        pub fn delete(self: *RouterGroup, path: []const u8) *GroupBuilder {
+            const builder = self.server.allocator.create(GroupBuilder) catch unreachable;
+            builder.* = .{
+                .server = self.server,
+                .prefix = self.prefix,
+                .path = std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path }) catch unreachable,
+                .method = .delete,
+                .middlewares = &.{},
+                .group = self,
+            };
+            return builder;
         }
 
-        pub fn patch(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
-            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            errdefer self.server.allocator.free(full_path);
-            try self.server.addRoute(.patch, full_path, true, callbacks, self);
+        pub fn patch(self: *RouterGroup, path: []const u8) *GroupBuilder {
+            const builder = self.server.allocator.create(GroupBuilder) catch unreachable;
+            builder.* = .{
+                .server = self.server,
+                .prefix = self.prefix,
+                .path = std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path }) catch unreachable,
+                .method = .patch,
+                .middlewares = &.{},
+                .group = self,
+            };
+            return builder;
         }
 
-        pub fn options(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
-            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            errdefer self.server.allocator.free(full_path);
-            try self.server.addRoute(.options, full_path, true, callbacks, self);
+        pub fn options(self: *RouterGroup, path: []const u8) *GroupBuilder {
+            const builder = self.server.allocator.create(GroupBuilder) catch unreachable;
+            builder.* = .{
+                .server = self.server,
+                .prefix = self.prefix,
+                .path = std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path }) catch unreachable,
+                .method = .options,
+                .middlewares = &.{},
+                .group = self,
+            };
+            return builder;
         }
 
-        pub fn head(self: *RouterGroup, path: []const u8, callbacks: anytype) !void {
-            const full_path = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path });
-            errdefer self.server.allocator.free(full_path);
-            try self.server.addRoute(.head, full_path, true, callbacks, self);
+        pub fn head(self: *RouterGroup, path: []const u8) *GroupBuilder {
+            const builder = self.server.allocator.create(GroupBuilder) catch unreachable;
+            builder.* = .{
+                .server = self.server,
+                .prefix = self.prefix,
+                .path = std.mem.concat(self.server.allocator, u8, &.{ self.prefix, path }) catch unreachable,
+                .method = .head,
+                .middlewares = &.{},
+                .group = self,
+            };
+            return builder;
         }
 
         pub fn group(self: *RouterGroup, sub_prefix: []const u8) !*RouterGroup {
             const new_prefix = try std.mem.concat(self.server.allocator, u8, &.{ self.prefix, sub_prefix });
             errdefer self.server.allocator.free(new_prefix);
 
-            const handlers = try self.server.allocator.alloc(ErrorHandler, 0);
-            errdefer self.server.allocator.free(handlers);
+            const handlers = std.ArrayList(ErrorHandler).initCapacity(self.server.allocator, 4) catch unreachable;
 
             const grp = try self.server.allocator.create(RouterGroup);
             grp.* = .{
@@ -239,9 +528,7 @@ pub const Server = struct {
         }
 
         pub fn onErr(self: *RouterGroup, handler: ErrorHandler) !void {
-            const new_handlers = try self.server.allocator.realloc(self.error_handlers, self.error_handlers.len + 1);
-            new_handlers[new_handlers.len - 1] = handler;
-            self.error_handlers = new_handlers;
+            try self.error_handlers.append(self.server.allocator, handler);
         }
     };
 
@@ -403,7 +690,7 @@ pub const Server = struct {
 
     fn handleError(server: *Server, ctx: *Context, err: anyerror, grp: ?*RouterGroup) void {
         if (grp) |g| {
-            for (g.error_handlers) |h| {
+            for (g.error_handlers.items) |h| {
                 h(ctx, err) catch |e| {
                     server.handleError(ctx, e, g.parent);
                     return;

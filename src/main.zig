@@ -10,18 +10,18 @@ pub fn main(init: std.process.Init) !void {
     var server = try mizu.Server.init(gpa, io);
     defer server.deinit();
 
-    try server.use(requestLogger);
-    try server.get("/", indexHandler);
-    try server.get("/hello/:name", helloHandler);
-    try server.post("/echo", echoHandler);
-    try server.get("/protected", .{ requireApiKey, protectedHandler });
+    server.get("/").middleware(requestLogger).register();
+    server.get("/").handle(indexHandler);
+    server.get("/hello/:name").handle(helloHandler);
+    server.post("/echo").handle(echoHandler);
+    server.get("/protected").middleware(requireApiKey).handle(protectedHandler);
 
     var api = server.group("/api");
-    try api.use(apiLogger);
-    try api.get("/users", usersHandler);
-    try api.post("/users", .{ requireJson, createUserHandler });
+    api.use("*").middleware(apiLogger).register();
+    api.get("/users").handle(usersHandler);
+    api.post("/users").middleware(requireJson).handle(createUserHandler);
     try api.onErr(apiErrorHandler);
-    try api.get("/error", errorHandler);
+    api.get("/error").handle(errorHandler);
 
     _ = server.group("/v1");
     try server.onErr(serverErrorHandler);
